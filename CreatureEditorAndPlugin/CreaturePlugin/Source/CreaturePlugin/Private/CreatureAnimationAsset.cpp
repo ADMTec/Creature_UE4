@@ -1,7 +1,10 @@
 
-#include "CreaturePluginPCH.h"
 #include "CreatureAnimationAsset.h"
 #include "CreatureCore.h"
+#include "EditorFramework/AssetImportData.h"
+#include "Serialization/ArchiveSaveCompressedProxy.h"
+#include "Serialization/ArchiveLoadCompressedProxy.h"
+#include "Serialization/BufferArchive.h"
 
 #if WITH_EDITORONLY_DATA
 FName UCreatureAnimationAsset::UpdateAndGetCreatureFilename()
@@ -55,7 +58,7 @@ FString& UCreatureAnimationAsset::GetJsonString()
 		if (CreatureFileJSonData.IsEmpty())
 		{
 			FArchiveLoadCompressedProxy Decompressor =
-				FArchiveLoadCompressedProxy(CreatureZipBinary, ECompressionFlags::COMPRESS_ZLIB);
+				FArchiveLoadCompressedProxy(CreatureZipBinary, NAME_Zlib, ECompressionFlags::COMPRESS_ZLIB);
 
 			if (Decompressor.IsError() || (CreatureZipBinary.Num() == 0))
 			{

@@ -30,6 +30,15 @@ For more information on how to use the runtimes, please head over to this [site]
 
 - **UMG Slate UI Support** Render and display your Creature Character Animations together with UE4's powerful UMG Slate UI Widget Framework
 
+- **Flow Particle Effects Support** Playback Particle Animations authored by the Creature Flow FX system Flipbook style
+
+### Sample Creature Character Animation Files
+
+You can find a list of different character JSONs and their associated PNG texture/character atlases to test out the runtime [here](https://github.com/kestrelm/Creature_UE4/tree/master/CharacterSamples).
+
+ In it, you should be able to download an animated Fox, Bat, Girl with Skin Swapping etc. from the provided [folder.](https://github.com/kestrelm/Creature_UE4/tree/master/CharacterSamples).
+ 
+
 ### Trying out the new fancy Creature Editor & Runtimes:
 The directory containing this is called **CreatureEditorAndPlugin**. Most of the concepts from the old runtimes apply to the new ones so it should not be too big of a change. However, you will get access to some fancy new features, including the CreatureAsset, CreatureMeshComponent, new UI and a state machine.
 
@@ -93,3 +102,17 @@ Please head over the [CreatureDemos](https://github.com/kestrelm/CreatureDemos) 
 - If the compiler complains about errors having to do with miniz, #define the **CREATURE_NO_USE_ZIP** preprocessor definition in your build.
 
 - If the compiler complains about errors having to do with exceptions ( or disallows exceptions in your environment ), #define the **CREATURE_NO_USE_EXCEPTIONS** preprocessor definition in your build.
+
+### Support for PaperZD
+
+[**PaperZD**](https://www.unrealengine.com/marketplace/paperzd) now supports Creature in UE4. ZetaD is response to Paper2D lack of animation support, allowing users to create their own AnimBP just as on 3D and be able to use them to drive the animation states or events in a easy and visual way.
+
+You can get the version of Creature that works with **PaperZD** [here](https://github.com/heavybullets/CreatureForPaperZD)
+
+## License
+The **Creature Runtimes** operate under 2 License types depending on whether you own a Licensed copy of [Creature](https://creature.kestrelmoon.com) or not.
+- **People who own a licensed copy of Creature:** You use the standard **Creature License** included with the runtime code. **TLDR:** You are free to publish/modify/sell your product with the Creature runtimes without needing to state you are using the runtimes/put the copyright notice in your code/app. If you already have been using the Creature runtimes as a licensed owner of Creature, nothing changes :)
+
+- **Everyone else:** The runtimes are released under the very permissive [**Apache License**](https://choosealicense.com/licenses/apache-2.0/) :)
+
+***Both Licenses allow for private use and do not require any disclosure of your source code.***

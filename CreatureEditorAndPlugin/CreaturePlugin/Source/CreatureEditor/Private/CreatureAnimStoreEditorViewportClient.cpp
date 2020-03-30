@@ -1,9 +1,7 @@
-
-#include "CreatureEditorPCH.h"
+#include "CreatureAnimStoreEditorViewportClient.h"
 #include "Runtime/Engine/Public/Slate/SceneViewport.h"
 #include "SEditorViewport.h"
 #include "AssetEditorModeManager.h"
-#include "CreatureAnimStoreEditorViewportClient.h"
 #include "CreatureMeshComponent.h"
 #include "CreatureAnimationClipsStore.h"
 FCreatureAnimStoreEditorViewportClient::FCreatureAnimStoreEditorViewportClient(const TWeakPtr<class SEditorViewport>& InEditorViewportWidget /*= nullptr*/, UCreatureAnimationClipsStore* EditingAnimStore)
@@ -11,7 +9,7 @@ FCreatureAnimStoreEditorViewportClient::FCreatureAnimStoreEditorViewportClient(c
 {
 	OwnerScene = MakeShareable(new FAdvancedPreviewScene(FPreviewScene::ConstructionValues()));
 	OwnerScene->SetFloorOffset(500);
-	FEditorViewportClient::FEditorViewportClient(nullptr, (OwnerScene.Get()), InEditorViewportWidget);
+	PreviewScene = OwnerScene.Get();
 	EditingStore=EditingAnimStore;
 	PreviewScene = (OwnerScene.Get());
 	((FAssetEditorModeManager*)ModeTools)->SetPreviewScene(PreviewScene);

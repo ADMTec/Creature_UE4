@@ -33,16 +33,18 @@
 * RUNTIMES.
 *****************************************************************************/
 
-// This is the Mesh Component version of the Creature Runtime. You can use this class if you want to add the Creature Runtime as a 
-// mesh component instead of a regular CreatureActor object.
-
+// This is the Mesh Component version of the Creature Runtime.
 #pragma once
 
 #include <vector>
 #include "CustomProceduralMeshComponent.h"
+#include "PrimitiveSceneProxy.h"
+#include "Components/MeshComponent.h"
 #include "CreatureAnimationAsset.h"
 #include "CreatureMetaAsset.h"
+#include "CreatureParticlesAsset.h"
 #include "CreatureCore.h"
+#include "Async/Future.h"
 #include "CreatureMeshComponent.generated.h"
 
 USTRUCT(BlueprintType)
@@ -134,7 +136,7 @@ USTRUCT(BlueprintType)
 struct FCreatureBoneIK  {
 	GENERATED_USTRUCT_BODY()
 	FCreatureBoneIK()
-		: children_ready(false)
+		: target_pos(ForceInitToZero), positive_angle(false), children_ready(false)
 	{
 	}
 
@@ -164,7 +166,7 @@ USTRUCT(BlueprintType)
 struct FCreatureFrameCallback {
 	GENERATED_USTRUCT_BODY()
 	FCreatureFrameCallback()
-		: triggered(false)
+		: frame(0), triggered(false)
 	{}
 
 	void resetCallback()
@@ -207,7 +209,7 @@ USTRUCT(BlueprintType)
 struct FCreatureRepeatFrameCallback {
 	GENERATED_USTRUCT_BODY()
 	FCreatureRepeatFrameCallback()
-		: currentFrame(0), triggeredFrame(0), startFrame(0)
+		: repeatFrames(0), offsetFrame(0), currentFrame(0), triggeredFrame(0), startFrame(0)
 	{}
 
 	void resetCallback(float frameIn)
@@ -314,7 +316,11 @@ public:
 	/** Points to a Creature Meta Asset containing the JSON of the mdata file exported out from Creature. This file contains extra data like animation data for region ordering for example. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Components|Creature")
 	UCreatureMetaAsset * creature_meta_asset;
-	
+
+	/** Points to a Creature Particles Asset containing exported Particles authored with the Flow System in Creature*/
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Components|Creature")
+	UCreatureParticlesAsset * creature_particles_asset;
+
 	/** Playback speed of the animation, 2.0 is the default */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components|Creature")
 	float animation_speed;
@@ -643,6 +649,22 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Components|Creature")
 	void AddSkinSwap(FString new_swap_name, TArray<FString> new_swap);
 
+	// Enables Region Color Animation
+	UFUNCTION(BlueprintCallable, Category = "Components|Creature")
+	void EnableRegionColors();
+
+	// Enables/Disables Morph Targets defined in the MetaData Asset
+	UFUNCTION(BlueprintCallable, Category = "Components|Creature")
+	void SetMorphTargetsActive(bool flag_in);
+
+	// Sets the Morph Targets world space point with a reference base pt
+	UFUNCTION(BlueprintCallable, Category = "Components|Creature")
+	void SetMorphTargetsWorldPt(FVector pt_in, FVector base_pt, float radius=1.0f, bool z_up=true);
+
+	// Returns the world space point of a vertex attachment given its name
+	UFUNCTION(BlueprintCallable, Category = "Components|Creature")
+	FVector GetVertexAttachment(FString name_in);
+
 	CreatureCore& GetCore();
 
 	virtual bool ShouldSkipTick() const;
@@ -737,6 +759,8 @@ protected:
 	void LoadAnimationFromStore();
 
 	void TryCreateBendPhysics();
+
+	void TryEnableParticles();
 
 	// future used for async creature processing
 	TFuture<bool> creatureTickResult;

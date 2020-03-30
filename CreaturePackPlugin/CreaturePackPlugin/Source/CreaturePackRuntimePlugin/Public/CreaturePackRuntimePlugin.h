@@ -1,8 +1,8 @@
 #pragma once
 
-#include "ModuleManager.h"
+#include "Modules/ModuleManager.h"
 
-class CreaturePackPlugin : public IModuleInterface
+class CreaturePackRuntimePlugin : public IModuleInterface
 {
 public:
     /** IModuleInterface implementation */

@@ -2,9 +2,10 @@
 //
 // forked from "Engine/Plugins/Runtime/CustomMeshComponent/Source/CustomMeshComponent/Private/CustomMeshComponent.cpp"
 
-#include "CreaturePluginPCH.h"
-#include "DynamicMeshBuilder.h"
 #include "CustomProceduralMeshComponent.h"
+#include "DynamicMeshBuilder.h"
+#include <Materials/Material.h>
+#include "Engine/CollisionProfile.h"
 #include "Runtime/Launch/Resources/Version.h"
 #include <Runtime/Core/Public/Async/ParallelFor.h>
 
@@ -24,27 +25,164 @@ static TAutoConsoleVariable<int32> CVarShowCreatureMeshes(
 	TEXT("1: rendered"),
 	ECVF_RenderThreadSafe);
 
+
+static FVertexBufferRHIRef AllocVertexBuffer(uint32 Stride, uint32 NumElements)
+{
+	FVertexBufferRHIRef VertexBufferRHI;
+	uint32 SizeInBytes = NumElements * Stride;
+	FRHIResourceCreateInfo CreateInfo;
+	VertexBufferRHI = RHICreateVertexBuffer(SizeInBytes, BUF_Volatile | BUF_ShaderResource, CreateInfo);
+
+	return VertexBufferRHI;
+}
+
+static void ReleaseVertexBuffer(FVertexBuffer& VertexBuffer)
+{
+}
+
 /** Vertex Buffer */
-class FProceduralMeshVertexBuffer : public FVertexBuffer
+class FProceduralMeshVertexBuffer : public FDynamicPrimitiveResource, public FRenderResource
 {
 public:
-	TArray<FDynamicMeshVertex> Vertices;
+	FVertexBuffer PositionBuffer;
+	FVertexBuffer TangentBuffer;
+	FVertexBuffer TexCoordBuffer;
+	FVertexBuffer ColorBuffer;
 
+	FShaderResourceViewRHIRef TangentBufferSRV;
+	FShaderResourceViewRHIRef TexCoordBufferSRV;
+	FShaderResourceViewRHIRef ColorBufferSRV;
+	FShaderResourceViewRHIRef PositionBufferSRV;
+
+	mutable TArray<FDynamicMeshVertex> Vertices;
+
+	FProceduralMeshVertexBuffer(uint32 InNumTexCoords = 1, uint32 InLightmapCoordinateIndex = 0, bool InUse16bitTexCoord = false) : NumTexCoords(InNumTexCoords), LightmapCoordinateIndex(InLightmapCoordinateIndex), Use16bitTexCoord(InUse16bitTexCoord)
+	{
+		check(NumTexCoords > 0 && NumTexCoords <= MAX_STATIC_TEXCOORDS);
+		check(LightmapCoordinateIndex < NumTexCoords);
+		buffersAllocated = false;
+	}
+
+	bool buffersAllocated;
+
+	// FRenderResource interface.
 	virtual void InitRHI() override
 	{
-		FRHIResourceCreateInfo CreateInfo;
-		VertexBufferRHI = RHICreateVertexBuffer(Vertices.Num() * sizeof(FDynamicMeshVertex), BUF_Static, CreateInfo);
-		UpdateRenderData();
+		uint32 TextureStride = sizeof(FVector2D);
+		EPixelFormat TextureFormat = PF_G32R32F;
+
+		if (Use16bitTexCoord)
+		{
+			TextureStride = sizeof(FVector2DHalf);
+			TextureFormat = PF_G16R16F;
 	}
 
-	void UpdateRenderData() const
+		if (!buffersAllocated)
 	{
-		// Copy the vertex data into the vertex buffer.
-		void* VertexBufferData = RHILockVertexBuffer(VertexBufferRHI, 0, Vertices.Num() * sizeof(FDynamicMeshVertex), RLM_WriteOnly);
-		FMemory::Memcpy(VertexBufferData, Vertices.GetData(), Vertices.Num() * sizeof(FDynamicMeshVertex));
-		RHIUnlockVertexBuffer(VertexBufferRHI);
+			PositionBuffer.VertexBufferRHI = AllocVertexBuffer(sizeof(FVector), Vertices.Num());
+			TangentBuffer.VertexBufferRHI = AllocVertexBuffer(sizeof(FPackedNormal), 2 * Vertices.Num());
+			TexCoordBuffer.VertexBufferRHI = AllocVertexBuffer(TextureStride, NumTexCoords * Vertices.Num());
+			ColorBuffer.VertexBufferRHI = AllocVertexBuffer(sizeof(FColor), Vertices.Num());
+
+			TangentBufferSRV = RHICreateShaderResourceView(TangentBuffer.VertexBufferRHI, 4, PF_R8G8B8A8);
+			TexCoordBufferSRV = RHICreateShaderResourceView(TexCoordBuffer.VertexBufferRHI, TextureStride, TextureFormat);
+			ColorBufferSRV = RHICreateShaderResourceView(ColorBuffer.VertexBufferRHI, 4, PF_R8G8B8A8);
+			PositionBufferSRV = RHICreateShaderResourceView(PositionBuffer.VertexBufferRHI, sizeof(float), PF_R32_FLOAT);
+			buffersAllocated = true;
 	}
 
+		void* TexCoordBufferData = RHILockVertexBuffer(TexCoordBuffer.VertexBufferRHI, 0, NumTexCoords * TextureStride * Vertices.Num(), RLM_WriteOnly);
+		FVector2D* TexCoordBufferData32 = !Use16bitTexCoord ? static_cast<FVector2D*>(TexCoordBufferData) : nullptr;
+		FVector2DHalf* TexCoordBufferData16 = Use16bitTexCoord ? static_cast<FVector2DHalf*>(TexCoordBufferData) : nullptr;
+
+		// Copy the vertex data into the vertex buffers.
+		FVector* PositionBufferData			= static_cast<FVector*>(RHILockVertexBuffer(PositionBuffer.VertexBufferRHI, 0, sizeof(FVector) * Vertices.Num(), RLM_WriteOnly));
+		FPackedNormal* TangentBufferData	= static_cast<FPackedNormal*>(RHILockVertexBuffer(TangentBuffer.VertexBufferRHI, 0, 2 * sizeof(FPackedNormal) * Vertices.Num(), RLM_WriteOnly));	
+		FColor* ColorBufferData				= static_cast<FColor*>(RHILockVertexBuffer(ColorBuffer.VertexBufferRHI, 0, sizeof(FColor) * Vertices.Num(), RLM_WriteOnly));
+
+		for (int32 i = 0; i < Vertices.Num(); i++)
+		{
+			PositionBufferData[i] = Vertices[i].Position;
+			TangentBufferData[2 * i + 0] = Vertices[i].TangentX;
+			TangentBufferData[2 * i + 1] = Vertices[i].TangentZ;
+			ColorBufferData[i] = Vertices[i].Color;
+
+			for (uint32 j = 0; j < NumTexCoords; j++)
+			{
+				if (Use16bitTexCoord)
+				{
+					TexCoordBufferData16[NumTexCoords * i + j] = FVector2DHalf(Vertices[i].TextureCoordinate[j]);
+				}
+				else
+				{
+					TexCoordBufferData32[NumTexCoords * i + j] = Vertices[i].TextureCoordinate[j];
+				}
+			}
+		}
+
+		RHIUnlockVertexBuffer(PositionBuffer.VertexBufferRHI);
+		RHIUnlockVertexBuffer(TangentBuffer.VertexBufferRHI);
+		RHIUnlockVertexBuffer(TexCoordBuffer.VertexBufferRHI);
+		RHIUnlockVertexBuffer(ColorBuffer.VertexBufferRHI);
+	}
+
+	void InitResource() override
+	{
+		FRenderResource::InitResource();
+		PositionBuffer.InitResource();
+		TangentBuffer.InitResource();
+		TexCoordBuffer.InitResource();
+		ColorBuffer.InitResource();
+	}
+
+	void ReleaseResource() override
+	{
+		FRenderResource::ReleaseResource();
+		PositionBuffer.ReleaseResource();
+		TangentBuffer.ReleaseResource();
+		TexCoordBuffer.ReleaseResource();
+		ColorBuffer.ReleaseResource();
+	}
+
+	virtual void ReleaseRHI() override
+	{
+		ReleaseVertexBuffer(PositionBuffer);
+		ReleaseVertexBuffer(TangentBuffer);
+		ReleaseVertexBuffer(TexCoordBuffer);
+		ReleaseVertexBuffer(ColorBuffer);
+		buffersAllocated = false;
+	}
+
+	// FDynamicPrimitiveResource interface.
+	virtual void InitPrimitiveResource() override
+	{
+		InitResource();
+	}
+
+	virtual void ReleasePrimitiveResource() override
+	{
+		ReleaseResource();
+		delete this;
+	}
+
+	const uint32 GetNumTexCoords() const
+	{
+		return NumTexCoords;
+	}
+
+	const uint32 GetLightmapCoordinateIndex() const
+	{
+		return LightmapCoordinateIndex;
+	}
+
+	const bool GetUse16bitTexCoords() const
+	{
+		return Use16bitTexCoord;
+	}
+private:
+	const uint32 NumTexCoords;
+	const uint32 LightmapCoordinateIndex;
+	const bool Use16bitTexCoord;
 };
 
 /** Index Buffer */
@@ -70,43 +208,125 @@ public:
 };
 
 /** Vertex Factory */
-class FProceduralMeshVertexFactory : public FLocalVertexFactory
+class FProceduralMeshVertexFactory : public FDynamicPrimitiveResource, public FLocalVertexFactory
 {
 public:
-	FProceduralMeshVertexFactory()
-	{
-	}
 
-	/** Initialization */
-	void Init(const FProceduralMeshVertexBuffer* VertexBuffer)
-	{
-		// Commented out to enable building light of a level (but no backing is done for the procedural mesh itself)
-		//check(!IsInRenderingThread());
+	/** Initialization constructor. */
+	FProceduralMeshVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, const FProceduralMeshVertexBuffer* InVertexBuffer) : FLocalVertexFactory(InFeatureLevel, "FPooledDynamicMeshVertexFactory"), VertexBuffer(InVertexBuffer) {}
 
-		ENQUEUE_UNIQUE_RENDER_COMMAND_TWOPARAMETER(
-			InitProceduralMeshVertexFactory,
-			FProceduralMeshVertexFactory*, VertexFactory, this,
-			const FProceduralMeshVertexBuffer*, VertexBuffer, VertexBuffer,
+	void InitResource() override
+	{
+		FLocalVertexFactory* VertexFactory = this;
+		const FProceduralMeshVertexBuffer* PooledVertexBuffer = VertexBuffer;
+		ENQUEUE_RENDER_COMMAND(InitProceduralMeshVertexFactory)(
+			[VertexFactory, PooledVertexBuffer](FRHICommandListImmediate& RHICmdList)
 		{
-			// Initialize the vertex factory's stream components.
-			FDataType NewData;
-			NewData.PositionComponent = STRUCTMEMBER_VERTEXSTREAMCOMPONENT(VertexBuffer,FDynamicMeshVertex,Position,VET_Float3);
-			NewData.TextureCoordinates.Add(
-				FVertexStreamComponent(VertexBuffer,STRUCT_OFFSET(FDynamicMeshVertex,TextureCoordinate),sizeof(FDynamicMeshVertex),VET_Float2)
-				);
-			NewData.TangentBasisComponents[0] = STRUCTMEMBER_VERTEXSTREAMCOMPONENT(VertexBuffer,FDynamicMeshVertex,TangentX,VET_PackedNormal);
-			NewData.TangentBasisComponents[1] = STRUCTMEMBER_VERTEXSTREAMCOMPONENT(VertexBuffer,FDynamicMeshVertex,TangentZ,VET_PackedNormal);
-			NewData.ColorComponent = STRUCTMEMBER_VERTEXSTREAMCOMPONENT(VertexBuffer, FDynamicMeshVertex, Color, VET_Color);
-			VertexFactory->SetData(NewData);
-		});
+			FDataType Data;
+			Data.PositionComponent = FVertexStreamComponent(
+				&PooledVertexBuffer->PositionBuffer,
+				0,
+				sizeof(FVector),
+				VET_Float3
+			);
+
+			Data.NumTexCoords = PooledVertexBuffer->GetNumTexCoords();
+
+	{
+				Data.LightMapCoordinateIndex = PooledVertexBuffer->GetLightmapCoordinateIndex();
+				Data.TangentsSRV = PooledVertexBuffer->TangentBufferSRV;
+				Data.TextureCoordinatesSRV = PooledVertexBuffer->TexCoordBufferSRV;
+				Data.ColorComponentsSRV = PooledVertexBuffer->ColorBufferSRV;
+				Data.PositionComponentSRV = PooledVertexBuffer->PositionBufferSRV;
 	}
+
+	{
+				EVertexElementType UVDoubleWideVertexElementType = VET_None;
+				EVertexElementType UVVertexElementType = VET_None;
+				uint32 UVSizeInBytes = 0;
+				if (PooledVertexBuffer->GetUse16bitTexCoords())
+				{
+					UVSizeInBytes = sizeof(FVector2DHalf);
+					UVDoubleWideVertexElementType = VET_Half4;
+					UVVertexElementType = VET_Half2;
+				}
+				else
+				{
+					UVSizeInBytes = sizeof(FVector2D);
+					UVDoubleWideVertexElementType = VET_Float4;
+					UVVertexElementType = VET_Float2;
+				}
+
+				int32 UVIndex;
+				uint32 UvStride = UVSizeInBytes * PooledVertexBuffer->GetNumTexCoords();
+				for (UVIndex = 0; UVIndex < (int32)PooledVertexBuffer->GetNumTexCoords() - 1; UVIndex += 2)
+		{
+					Data.TextureCoordinates.Add
+					(
+						FVertexStreamComponent(
+							&PooledVertexBuffer->TexCoordBuffer,
+							UVSizeInBytes * UVIndex,
+							UvStride,
+							UVDoubleWideVertexElementType,
+							EVertexStreamUsage::ManualFetch
+						)
+				);
+				}
+
+				// possible last UV channel if we have an odd number
+				if (UVIndex < (int32)PooledVertexBuffer->GetNumTexCoords())
+				{
+					Data.TextureCoordinates.Add(FVertexStreamComponent(
+						&PooledVertexBuffer->TexCoordBuffer,
+						UVSizeInBytes * UVIndex,
+						UvStride,
+						UVVertexElementType,
+						EVertexStreamUsage::ManualFetch
+					));
+				}
+
+				Data.TangentBasisComponents[0] = FVertexStreamComponent(&PooledVertexBuffer->TangentBuffer, 0, 2 * sizeof(FPackedNormal), VET_PackedNormal, EVertexStreamUsage::ManualFetch);
+				Data.TangentBasisComponents[1] = FVertexStreamComponent(&PooledVertexBuffer->TangentBuffer, sizeof(FPackedNormal), 2 * sizeof(FPackedNormal), VET_PackedNormal, EVertexStreamUsage::ManualFetch);
+				Data.ColorComponent = FVertexStreamComponent(&PooledVertexBuffer->ColorBuffer, 0, sizeof(FColor), VET_Color, EVertexStreamUsage::ManualFetch);
+			}
+			VertexFactory->SetData(Data);
+
+			
+		});
+
+		auto buffers_valid = VertexBuffer->PositionBuffer.VertexBufferRHI.GetReference()
+			&& VertexBuffer->TangentBuffer.VertexBufferRHI.GetReference()
+			&& VertexBuffer->ColorBuffer.VertexBufferRHI.GetReference()
+			&& VertexBuffer->TexCoordBuffer.VertexBufferRHI.GetReference();
+
+		if (IsInRenderingThread() && buffers_valid)
+		{
+			FLocalVertexFactory::InitResource();
+		}
+	}
+
+	// FDynamicPrimitiveResource interface.
+	void InitPrimitiveResource() override
+	{
+		InitResource();
+	}
+
+	void ReleasePrimitiveResource() override
+	{
+		ReleaseResource();
+		delete this;
+	}
+
+private:
+	const FProceduralMeshVertexBuffer* VertexBuffer;
 };
 
 /** Mesh Render Packet**/
 class FProceduralMeshRenderPacket
 {
 public:
-	FProceduralMeshRenderPacket(FProceduralMeshTriData * data_in)
+	FProceduralMeshRenderPacket(FProceduralMeshTriData * data_in, ERHIFeatureLevel::Type InFeatureLevel) :
+		VertexFactory(InFeatureLevel, &VertexBuffer)
 	{
 		indices = data_in->indices;
 		points = data_in->points;
@@ -114,7 +334,7 @@ public:
 		point_num = data_in->point_num;
 		indices_num = data_in->indices_num;
 		real_indices_num = indices_num;
-		region_alphas = data_in->region_alphas;
+		region_colors = data_in->region_colors;
 		update_lock = data_in->update_lock;
 		should_release = false;
 
@@ -175,11 +395,13 @@ public:
 				this->points[pos_idx + y_id],
 				this->points[pos_idx + z_id]);
 
-			float set_alpha = (*this->region_alphas)[i];
-			curVert.Color = FColor(set_alpha, set_alpha, set_alpha, set_alpha);
+			curVert.Color = (*this->region_colors)[i];
 
 			int uv_idx = i * 2;
-			curVert.TextureCoordinate.Set(this->uvs[uv_idx], this->uvs[uv_idx + 1]);
+			for (int texCoord = 0; texCoord < MAX_STATIC_TEXCOORDS; texCoord++)
+			{
+				curVert.TextureCoordinate[texCoord].Set(this->uvs[uv_idx], this->uvs[uv_idx + 1]);
+			}
 #ifdef CREATURE_MULTICORE
 		});
 #else
@@ -218,18 +440,12 @@ public:
 	void UpdateDirectVertexData() const
 	{
 		SCOPE_CYCLE_COUNTER(STAT_UpdateDirectVertexData);
-		
+
 		int32 numReadyVertices = VertexCache.Num();
 		check(numReadyVertices == point_num);
 
-		FDynamicMeshVertex* VertexBufferData = (FDynamicMeshVertex *)RHILockVertexBuffer(VertexBuffer.VertexBufferRHI, 0, numReadyVertices * sizeof(FDynamicMeshVertex), RLM_WriteOnly);
-
-		{
-			FScopeLock scope_lock(update_lock.Get());
-			FMemory::Memcpy(VertexBufferData, &VertexCache[0], numReadyVertices * sizeof(FDynamicMeshVertex));
-		}
-
-		RHIUnlockVertexBuffer(VertexBuffer.VertexBufferRHI);
+		VertexBuffer.Vertices = VertexCache;
+		VertexBuffer.InitRHI();
 	}
 
 	void UpdateDirectIndexData() const
@@ -244,14 +460,14 @@ public:
 		RHIUnlockIndexBuffer(IndexBuffer.IndexBufferRHI);
 	}
 
-	FProceduralMeshVertexBuffer VertexBuffer;
+	mutable FProceduralMeshVertexBuffer VertexBuffer;
 	FProceduralMeshIndexBuffer IndexBuffer;
 	FProceduralMeshVertexFactory VertexFactory;
 	glm::uint32 * indices;
 	glm::float32 * points;
 	glm::float32 * uvs;
 	int32 point_num, indices_num, real_indices_num;
-	TArray<uint8> * region_alphas;
+	TArray<FColor> * region_colors;
 	TSharedPtr<FCriticalSection, ESPMode::ThreadSafe> update_lock;
 	bool should_release;
 };
@@ -275,8 +491,14 @@ FCProceduralMeshSceneProxy::FCProceduralMeshSceneProxy(
 	// Add each triangle to the vertex/index buffer
 	if (targetTrisIn)
 	{
-		AddRenderPacket(targetTrisIn, startColorIn);
+		AddRenderPacket(targetTrisIn, startColorIn, GetScene().GetFeatureLevel());
 	}
+}
+
+SIZE_T FCProceduralMeshSceneProxy::GetTypeHash() const
+{
+	static size_t UniquePointer;
+	return reinterpret_cast<size_t>(&UniquePointer);
 }
 
 FCProceduralMeshSceneProxy::~FCProceduralMeshSceneProxy()
@@ -311,14 +533,17 @@ void FCProceduralMeshSceneProxy::UpdateMaterial()
 	needs_material_updating = false;
 }
 
-void FCProceduralMeshSceneProxy::AddRenderPacket(FProceduralMeshTriData * targetTrisIn, const FColor& startColorIn)
+void FCProceduralMeshSceneProxy::AddRenderPacket(FProceduralMeshTriData * targetTrisIn, const FColor& startColorIn, ERHIFeatureLevel::Type featureLevel)
 {
 	FScopeLock packetLock(&renderPacketsCS);
 
-	FProceduralMeshRenderPacket new_packet(targetTrisIn);
-	renderPackets.Add(new_packet);
-
-	FProceduralMeshRenderPacket& cur_packet = renderPackets[renderPackets.Num() - 1];
+	//FProceduralMeshRenderPacket new_packet(featureLevel);
+	//FProceduralMeshRenderPacket& cur_packet = renderPackets.Add_GetRef(new_packet);
+    
+	//auto packetPtr = new(renderPackets) FProceduralMeshRenderPacket(targetTrisIn, featureLevel);
+    renderPackets.Add(new FProceduralMeshRenderPacket(targetTrisIn, featureLevel));
+    auto packetPtr = &renderPackets.Last();
+	auto &cur_packet = *packetPtr;
 
 	auto& IndexBuffer = cur_packet.IndexBuffer;
 	auto& VertexBuffer = cur_packet.VertexBuffer;
@@ -340,16 +565,18 @@ void FCProceduralMeshSceneProxy::AddRenderPacket(FProceduralMeshTriData * target
 	// Fill initial points
 	for (int32 i = 0; i < cur_packet.point_num; i++)
 	{
-		FDynamicMeshVertex Vert0;
+		FDynamicMeshVertex &Vert = VertexBuffer.Vertices[i];
 		int pos_idx = i * 3;
-		Vert0.Position = FVector(cur_packet.points[pos_idx + x_id], cur_packet.points[pos_idx + y_id], cur_packet.points[pos_idx + z_id]);
+		Vert.Position = FVector(cur_packet.points[pos_idx + x_id], cur_packet.points[pos_idx + y_id], cur_packet.points[pos_idx + z_id]);
 
-		Vert0.Color = startColorIn;
-		Vert0.SetTangents(FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1));
+		Vert.Color = startColorIn;
+		Vert.SetTangents(FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1));
 
 		int uv_idx = i * 2;
-		Vert0.TextureCoordinate.Set(cur_packet.uvs[uv_idx], cur_packet.uvs[uv_idx + 1]);
-		VertexBuffer.Vertices[i] = Vert0;
+		for (int texCoord = 0; texCoord < MAX_STATIC_TEXCOORDS; texCoord++)
+		{
+			Vert.TextureCoordinate[texCoord].Set(cur_packet.uvs[uv_idx], cur_packet.uvs[uv_idx + 1]);
+		}
 	}
 
 	// Set Initial Rest Tangents
@@ -372,7 +599,7 @@ void FCProceduralMeshSceneProxy::AddRenderPacket(FProceduralMeshTriData * target
 	}
 
 	// Init vertex factory
-	VertexFactory.Init(&VertexBuffer);
+	VertexFactory.InitResource();
 
 	// Enqueue initialization of render resource
 	cur_packet.InitForRender();
@@ -481,25 +708,7 @@ void FCProceduralMeshSceneProxy::GetDynamicMeshElements(const TArray<const FScen
 		return;
 	}
 			
-	const bool bWireframe = AllowDebugViewmodes() && ViewFamily.EngineShowFlags.Wireframe;
-
-	auto WireframeMaterialInstance = new FColoredMaterialRenderProxy(
-		GEngine->WireframeMaterial ? GEngine->WireframeMaterial->GetRenderProxy(IsSelected()) : NULL,
-		FLinearColor(0, 0.5f, 1.f)
-		);
-
-	Collector.RegisterOneFrameMaterialProxy(WireframeMaterialInstance);
-
-	FMaterialRenderProxy* MaterialProxy = NULL;
-	if (bWireframe)
-	{
-		MaterialProxy = WireframeMaterialInstance;
-	}
-	else
-	{
-		MaterialProxy = Material->GetRenderProxy(IsSelected());
-	}
-
+	FMaterialRenderProxy* MaterialProxy = Material->GetRenderProxy();
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
 		if (VisibilityMap & (1 << ViewIndex))
@@ -510,10 +719,10 @@ void FCProceduralMeshSceneProxy::GetDynamicMeshElements(const TArray<const FScen
 			FMeshBatch& Mesh = Collector.AllocateMesh();
 			FMeshBatchElement& BatchElement = Mesh.Elements[0];
 			BatchElement.IndexBuffer = &IndexBuffer;
-			Mesh.bWireframe = bWireframe;
+			Mesh.bWireframe = false;
 			Mesh.VertexFactory = &VertexFactory;
 			Mesh.MaterialRenderProxy = MaterialProxy;
-			BatchElement.PrimitiveUniformBuffer = CreatePrimitiveUniformBufferImmediate(GetLocalToWorld(), GetBounds(), GetLocalBounds(), true, UseEditorDepthTest());
+			BatchElement.PrimitiveUniformBuffer = nullptr;
 			BatchElement.FirstIndex = 0;
 			BatchElement.NumPrimitives = cur_packet.real_indices_num / 3;
 			BatchElement.MinVertexIndex = 0;
@@ -598,12 +807,12 @@ void UCustomProceduralMeshComponent::SendRenderDynamicData_Concurrent()
 	if (proxy)
 	{
 		// Enqueue command to send to render thread
-		ENQUEUE_UNIQUE_RENDER_COMMAND_ONEPARAMETER(
-			FSendCreatureDynamicData,
-			FCProceduralMeshSceneProxy*, sceneProxy, proxy,
-			{
-				sceneProxy->SetDynamicData_RenderThread();
-			});
+        FCProceduralMeshSceneProxy* sceneProxy = proxy;
+        ENQUEUE_RENDER_COMMAND(FSendCreatureDynamicData)(
+            [sceneProxy](FRHICommandListImmediate& RHICmdList)
+        {
+            sceneProxy->SetDynamicData_RenderThread();
+        });
 	}
 }
 

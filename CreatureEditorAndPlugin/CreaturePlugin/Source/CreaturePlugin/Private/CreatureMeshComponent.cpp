@@ -1,13 +1,14 @@
 
-#include "CreaturePluginPCH.h"
 #include "CreatureMeshComponent.h"
+#include "CreaturePluginPCH.h"
 #include "CreatureAnimStateMachine.h"
 //////////////////////////////////////////////////////////////////////////
 //Changed by god of pen
 //////////////////////////////////////////////////////////////////////////
 #include "CreatureAnimationClipsStore.h"
 #include "CreatureAnimStateMachineInstance.h"
-
+#include "Async/Async.h"
+#include "DrawDebugHelpers.h"
 #include <math.h>
 
 #ifdef _WIN32
@@ -332,6 +333,41 @@ void UCreatureMeshComponent::AddSkinSwap(FString new_swap_name, TArray<FString> 
 	}
 }
 
+void UCreatureMeshComponent::EnableRegionColors()
+{
+	creature_core.enableRegionColors();
+}
+
+void UCreatureMeshComponent::SetMorphTargetsActive(bool flag_in)
+{
+	creature_core.run_morph_targets = flag_in;
+}
+
+void UCreatureMeshComponent::SetMorphTargetsWorldPt(FVector pt_in, FVector base_pt, float radius, bool z_up)
+{
+	auto char_base_pos = GetComponentToWorld().InverseTransformPosition(base_pt);
+	auto char_pt_pos = GetComponentToWorld().InverseTransformPosition(pt_in);
+	radius = 1.0f /((GetComponentToWorld().GetScale3D().X + GetComponentToWorld().GetScale3D().Y) * 0.5f) * radius;
+
+	if (z_up)
+	{
+		std::swap(char_base_pos.Z, char_base_pos.Y);
+		std::swap(char_pt_pos.Z, char_pt_pos.Y);
+	}
+
+	if (creature_meta_asset)
+	{
+		if (creature_meta_asset->GetMetaData()->morph_data.isValid())
+		{
+			creature_meta_asset->GetMetaData()->computeMorphWeightsWorld(
+				FVector2D(char_pt_pos.X, -char_pt_pos.Y),
+				FVector2D(char_base_pos.X, -char_base_pos.Y),
+				radius
+			);
+		}
+	}
+}
+
 void UCreatureMeshComponent::TryCreateBendPhysics()
 {
 	if (delay_bendphysics_clip.Len() == 0)
@@ -359,6 +395,27 @@ void UCreatureMeshComponent::TryCreateBendPhysics()
 	}
 
 	delay_bendphysics_clip = FString("");
+}
+
+FVector UCreatureMeshComponent::GetVertexAttachment(FString name_in)
+{
+	if (creature_meta_asset)
+	{
+		auto meta_data = creature_meta_asset->GetMetaData();
+		if (meta_data->vertex_attachments.Contains(name_in))
+		{
+			auto base_xform = GetComponentToWorld();
+			auto cur_creature = creature_core.creature_manager->GetCreature();
+			auto vert_idx = meta_data->vertex_attachments[name_in];
+			FVector vert_pos(
+				cur_creature->GetRenderPts()[vert_idx * 3],
+				cur_creature->GetRenderPts()[vert_idx * 3 + 2],
+				cur_creature->GetRenderPts()[vert_idx * 3 + 1]);
+			return base_xform.TransformPosition(vert_pos);
+		}
+	}
+
+	return FVector(0,0,0);
 }
 
 CreatureCore& UCreatureMeshComponent::GetCore()
@@ -506,6 +563,13 @@ void UCreatureMeshComponent::UpdateCoreValues()
 void UCreatureMeshComponent::PrepareRenderData(CreatureCore &forCore)
 {
 	RecreateRenderProxy(true);
+
+	GetCore().ClearMeshModifier();
+	if (creature_particles_asset)
+	{
+		TryEnableParticles();
+	}
+
 	SetProceduralMeshTriData(forCore.GetProcMeshData(GetWorld()->WorldType));
 }
 
@@ -554,11 +618,14 @@ void UCreatureMeshComponent::RunTick(float DeltaTime)
 	if (run_task_multicore) {
 		// Make sure this only runs for characters that will not be removed from the scene
 		// otherwise it might not be safe
-		creatureTickResult = Async<bool>(EAsyncExecution::TaskGraph, [this, DeltaTime]()
+
+		TFunction<bool()> aTask = [this, DeltaTime]() -> bool
 		{
 			SCOPE_CYCLE_COUNTER(STAT_CreatureMesh_Tick_Async);
 			return RunTickProcessing(DeltaTime, false);
-		});
+		};
+
+		creatureTickResult = Async(EAsyncExecution::TaskGraph, aTask);
 	}
 	else {
 		auto can_tick = RunTickProcessing(DeltaTime, true);
@@ -783,7 +850,14 @@ void UCreatureMeshComponent::DoCreatureMeshUpdate(int render_packet_idx, bool ma
 	FCProceduralMeshSceneProxy *localRenderProxy = GetLocalRenderProxy();
 	if (localRenderProxy)
 	{
-		int32 draw_indices_num = creature_core.shouldSkinSwap() ? creature_core.GetRealTotalIndicesNum() : -1;
+		if (creature_core.HasMeshModifier())
+		{
+			// Update mesh using modifier
+			creature_core.UpdateMeshModifier();
+		}
+
+		bool has_dynamic_indices = (creature_core.shouldSkinSwap() || creature_core.HasMeshModifier());
+		int32 draw_indices_num = has_dynamic_indices ? creature_core.GetRealTotalIndicesNum() : -1;
 		localRenderProxy->SetNeedsIndexUpdate(creature_core.should_update_render_indices, draw_indices_num);
 	}
 
@@ -868,7 +942,7 @@ UCreatureMeshComponent::GetCollectionDataFromClip(FCreatureMeshCollectionClip * 
 
 bool UCreatureMeshComponent::ShouldSkipTick() const
 {
-	return (GetOwner() && GetOwner()->bHidden) || bHiddenInGame || completely_disable || !bVisible;
+	return (GetOwner() && GetOwner()->IsHidden()) || bHiddenInGame || completely_disable || !IsVisible();
 }
 
 void UCreatureMeshComponent::TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction *ThisTickFunction)
@@ -1108,7 +1182,7 @@ FPrimitiveSceneProxy* UCreatureMeshComponent::CreateSceneProxy()
 		auto proc_mesh_data = cur_data.creature_core.GetProcMeshData(GetWorld()->WorldType);
 		if (proc_mesh_data.point_num > 0) {
 
-			Proxy->AddRenderPacket(&proc_mesh_data, start_color);
+			Proxy->AddRenderPacket(&proc_mesh_data, start_color, GetScene()->GetFeatureLevel());
 		}
 	}
 
@@ -1181,7 +1255,7 @@ void UCreatureMeshComponent::LoadAnimationFromStore()
 				auto not_editor_mode = ((GetWorld()->WorldType != EWorldType::Type::Editor) &&
 					(GetWorld()->WorldType != EWorldType::Type::EditorPreview));
 				FColor start_color = not_editor_mode ? FColor(0, 0, 0, 0) : FColor::White;
-				localRenderProxy->AddRenderPacket(&proc_mesh_data, start_color);
+				localRenderProxy->AddRenderPacket(&proc_mesh_data, start_color, GetScene()->GetFeatureLevel());
 			}
 		}
 
@@ -1753,6 +1827,15 @@ void UCreatureMeshComponent::ProcessFrameCallbacks()
 				CreatureRepeatFrameCallbackEvent.Broadcast(frame_callback.name);
 			}
 		}
+	}
+}
+
+void UCreatureMeshComponent::TryEnableParticles()
+{
+	if ((GetWorld()->WorldType != EWorldType::Type::Editor) &&
+		(GetWorld()->WorldType != EWorldType::Type::EditorPreview))
+	{
+		creature_particles_asset->setupMeshModifier(GetCore());
 	}
 }
 

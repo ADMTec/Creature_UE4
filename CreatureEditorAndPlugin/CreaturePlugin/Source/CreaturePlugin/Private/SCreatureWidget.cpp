@@ -1,7 +1,7 @@
-#include "CreaturePluginPCH.h"
 #include "SCreatureWidget.h"
+#include "CreaturePluginPCH.h"
+#include "SlateCore/Public/Rendering/DrawElements.h"
 #include "Slate/SMeshWidget.h"
-#include "Rendering/DrawElements.h"
 #include "Modules/ModuleManager.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -37,6 +37,12 @@ void SCreatureWidget::UpdateMesh(const FVector2D& translation, const FVector2D& 
 	}
 
 	auto proc_mesh = creature_core->GetProcMeshData(world_type);
+	creature_core->UpdateCreatureRender();
+
+	if (creature_core->shouldSkinSwap())
+	{
+		proc_mesh.indices_num = creature_core->GetRealTotalIndicesNum();
+	}
 
 	// Update Indices
 	if (render_data.IndexData.Num() != proc_mesh.indices_num) {
@@ -63,8 +69,7 @@ void SCreatureWidget::UpdateMesh(const FVector2D& translation, const FVector2D& 
 		new_vert.Position.Y *= -mesh_scale.Y * local_scale.Y;
 		new_vert.Position += translation;
 
-		uint8 cur_alpha = (*proc_mesh.region_alphas)[i];
-		new_vert.Color = FColor(cur_alpha, cur_alpha, cur_alpha, cur_alpha);
+		new_vert.Color = (*proc_mesh.region_colors)[i];
 
 		float cur_u = proc_mesh.uvs[i * 2];
 		float cur_v = proc_mesh.uvs[i * 2 + 1];
@@ -92,10 +97,8 @@ int32 SCreatureWidget::OnPaint(
 	auto can_draw = render_brush && (render_data.VertexData.Num() > 0) && (render_data.IndexData.Num() > 0);
 	if (can_draw)
 	{
-		FSlateBrush * MyBrush = render_brush;
-		FSlateShaderResourceProxy* ResourceProxy = FSlateDataPayload::ResourceManager->GetShaderResource(*MyBrush);
-		FSlateResourceHandle Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(*MyBrush);
-
+		FSlateResourceHandle Handle = FSlateApplication::Get().GetRenderer()->GetResourceHandle(*render_brush);
+		const FSlateShaderResourceProxy * ResourceProxy = Handle.GetResourceProxy();
 		if (ResourceProxy) {
 			FSlateDrawElement::MakeCustomVerts(
 				OutDrawElements,
